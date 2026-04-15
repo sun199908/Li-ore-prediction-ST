@@ -3,82 +3,132 @@ import pandas as pd
 import joblib
 import numpy as np
 
-st.set_page_config(page_title="锂矿预测模型", layout="wide", page_icon="💎")
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="锂矿预测系统", layout="wide", page_icon="💎")
 
-# --- 1. 配置映射关系 (请确保这里的 0,1,2,3 顺序与训练数据一致) ---
-ERA_OPTIONS = ["早二叠世", "晚二叠世", "早石炭世", "中石炭世", "晚石炭世"]
-ERA_MAP = {val: i for i, val in enumerate(ERA_OPTIONS)}
+# --- 2. 常量定义 (必须与训练模型时的编码一致) ---
+# 定义映射字典：将中文选项映射为训练时使用的数值
+ERA_OPTIONS = ["早石炭世", "晚石炭世", "早二叠世", "晚二叠世"]
+ERA_MAP = {val: float(i) for i, val in enumerate(ERA_OPTIONS)}
 
-ZONE_OPTIONS = ["黔中", "滇东-贵西", "黔北-渝南", "河南", "山西"]
-ZONE_MAP = {val: i for i, val in enumerate(ZONE_OPTIONS)}
+ZONE_OPTIONS = ["黔北", "黔中", "山西", "河南", "山东", "桂北"]
+ZONE_MAP = {val: float(i) for i, val in enumerate(ZONE_OPTIONS)}
 
-# 必须与训练时的 features 列表顺序完全一致
-FINAL_FEATURES = ["Al2O3", "SiO2", "Fe2O3", "A/S", "成矿时代", "成矿区带"]
+# 对应训练脚本中的英文特征名
+FINAL_FEATURES = ["Al2O3", "SiO2", "Fe2O3", "A/S", "Mineralization age", "Mineralization belt"]
 CLASS_MAPPING = {0: '无矿', 1: '矿化'}
 
-# --- 2. 加载模型 ---
+# --- 3. 加载模型资产 ---
 @st.cache_resource
 def load_assets():
-    model = joblib.load('SVC_model4.15.joblib')
-    scaler = joblib.load('scalerLi4.15.joblib')
-    return model, scaler
+    try:
+        model = joblib.load('SVC_model4.15.joblib')
+        scaler = joblib.load('scalerLi4.15.joblib')
+        return model, scaler
+    except Exception as e:
+        st.error(f"无法加载模型文件，请检查目录下是否存在对应的 .joblib 文件。错误: {e}")
+        st.stop()
 
 model, scaler = load_assets()
 
-# --- 3. 预处理函数 ---
+# --- 4. 核心预处理逻辑 ---
 def preprocess_data(df_input):
+    """
+    将原始输入(包含中文和数值)转换为模型可读取的纯数字格式
+    """
     df = df_input.copy()
     
-    # 处理文本映射
-    if '成矿时代' in df.columns and df['成矿时代'].dtype == object:
-        df['成矿时代'] = df['成矿时代'].map(ERA_MAP)
-    if '成矿区带' in df.columns and df['成矿区带'].dtype == object:
-        df['成矿区带'] = df['成矿区带'].map(ZONE_MAP)
-        
-    # 计算 A/S
+    # A. 确保数值列是数字类型 (处理 Excel 读取时可能的格式问题)
+    numeric_cols = ["Al2O3", "SiO2", "Fe2O3"]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # B. 计算 A/S
     eps = 1e-5
-    df['A/S'] = df["Al2O3"] / np.where(df["SiO2"] == 0, eps, df["SiO2"])
+    df['A/S'] = df["Al2O3"] / (df["SiO2"] + eps)
     
-    # 按照训练时的特征顺序提取，并处理缺失值
-    df = df[FINAL_FEATURES].fillna(0)
+    # C. 映射文本列为数值 (处理‘成矿时代’和‘成矿区带’)
+    # 如果列里已经是数字，则保留；如果是中文，则按字典映射
+    if '成矿时代' in df.columns:
+        df['Mineralization age'] = df['成矿时代'].map(ERA_MAP).fillna(df['成矿时代'])
+    if '成矿区带' in df.columns:
+        df['Mineralization belt'] = df['成矿区带'].map(ZONE_MAP).fillna(df['成矿区带'])
     
-    # 【核心修复】返回 .values (numpy数组)，避开 sklearn 的特征名检查
-    return df.astype(float)
+    # D. 最终校验：提取特征列并强制转为 float
+    # errors='coerce' 会将无法转换的残余文本变为 NaN，随后用 0 填充
+    df_final = df[FINAL_FEATURES].apply(pd.to_numeric, errors='coerce').fillna(0)
+    
+    return df_final
 
-# --- 4. UI 逻辑 ---
+# --- 5. 用户界面 ---
 st.title("💎 铝土矿伴生锂预测模型")
+st.markdown("---")
 
-# 侧边栏单样品输入
+# 侧边栏：单样品输入
 with st.sidebar:
     st.header("📥 单样品输入")
-    al = st.number_input("Al2O3 (wt%)", value=60.0)
-    si = st.number_input("SiO2 (wt%)", value=10.0)
-    fe = st.number_input("Fe2O3 (wt%)", value=5.0)
-    era = st.selectbox("成矿时代", ERA_OPTIONS)
-    zone = st.selectbox("成矿区带", ZONE_OPTIONS)
+    input_al = st.number_input("Al2O3 (wt%)", value=60.0, step=0.1)
+    input_si = st.number_input("SiO2 (wt%)", value=10.0, step=0.1)
+    input_fe = st.number_input("Fe2O3 (wt%)", value=5.0, step=0.1)
+    input_era = st.selectbox("成矿时代", ERA_OPTIONS)
+    input_zone = st.selectbox("成矿区带", ZONE_OPTIONS)
 
-# 预测按钮
-if st.button("开始预测"):
-    # 构建输入数据
-    single_data = pd.DataFrame([{
-        "Al2O3": al, "SiO2": si, "Fe2O3": fe, "成矿时代": era, "成矿区带": zone
-    }])
-    
-    processed_df = preprocess_data(single_data)
-    
-    # 【关键】使用 .values 确保不带列名进入 scaler
-    input_scaled = scaler.transform(processed_df.values) 
-    
-    pred = model.predict(input_scaled)[0]
-    
-    st.success(f"### 预测结果: **{CLASS_MAPPING.get(int(pred), '未知')}**")
-    
-    # 只有当模型训练时开启了 probability=True 才能运行以下代码
-    try:
-        probs = model.predict_proba(input_scaled)[0]
-        st.write("#### 预测概率分布")
-        st.bar_chart(pd.Series(probs, index=["无矿", "矿化"]))
-    except AttributeError:
-        st.warning("提示：当前模型文件不支持概率预测，请在训练时设置 SVC(probability=True)。")
+# 主界面：展示预测结果
+col_left, col_right = st.columns([1, 1])
 
-# 批量预测部分 (略，逻辑同上，使用 preprocess_data(batch_raw).values 即可)
+with col_left:
+    if st.button("🚀 开始单样品预测"):
+        # 构建 DataFrame
+        single_df = pd.DataFrame([{
+            "Al2O3": input_al, "SiO2": input_si, "Fe2O3": input_fe,
+            "成矿时代": input_era, "成矿区带": input_zone
+        }])
+        
+        # 预处理
+        processed_data = preprocess_data(single_df)
+        
+        # 标准化与预测 (使用 .values 避免特征名警告)
+        scaled_data = scaler.transform(processed_data.values)
+        prediction = model.predict(scaled_data)[0]
+        
+        # 结果显示
+        res_label = CLASS_MAPPING.get(int(prediction), "未知")
+        st.success(f"### 预测结论: **{res_label}**")
+        st.write("计算得到的特征值：")
+        st.dataframe(processed_data)
+        
+        # 概率预测 (仅当训练时开启了 probability=True)
+        try:
+            probs = model.predict_proba(scaled_data)[0]
+            st.write("#### 预测概率")
+            prob_df = pd.DataFrame([probs], columns=["无矿概率", "矿化概率"])
+            st.bar_chart(prob_df.T)
+        except:
+            st.info("提示：模型未开启概率预测功能。")
+
+# 批量预测模块
+with col_right:
+    st.header("📂 批量预测")
+    uploaded_file = st.file_uploader("上传 Excel 文件", type=["xlsx"])
+    
+    if uploaded_file:
+        batch_raw = pd.read_excel(uploaded_file)
+        # 检查必要的列名是否存在
+        required = ["Al2O3", "SiO2", "Fe2O3", "成矿时代", "成矿区带"]
+        if all(col in batch_raw.columns for col in required):
+            if st.button("📊 执行批量分析"):
+                with st.spinner("处理中..."):
+                    batch_processed = preprocess_data(batch_raw)
+                    batch_scaled = scaler.transform(batch_processed.values)
+                    batch_preds = model.predict(batch_scaled)
+                    
+                    # 结果合并
+                    results = batch_raw.copy()
+                    results['预测结果'] = [CLASS_MAPPING.get(int(p), "未知") for p in batch_preds]
+                    
+                    st.dataframe(results)
+                    # 下载按钮
+                    csv = results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📥 下载结果表格", data=csv, file_name="batch_results.csv")
+        else:
+            st.error(f"上传文件必须包含以下列：{required}")
